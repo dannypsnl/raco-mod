@@ -1,8 +1,12 @@
 #lang racket/base
 ;; raco mod -- per-project Racket dependencies with Minimal Version Selection,
 ;; driven only by info.rkt.
-(require racket/match racket/system setup/dirs
-         "mvs.rkt" "project.rkt" "pkginfo.rkt")
+(require racket/match
+         racket/system
+         setup/dirs
+         "private/mvs.rkt"
+         "private/project.rkt"
+         "private/pkginfo.rkt")
 
 (define usage #<<EOF
 usage: raco mod <command> [args]
