@@ -162,6 +162,12 @@
   (make-directory* (build-path (state-dir root) "compiled"))
   (with-output-to-file links-file #:exists 'truncate/replace
     (λ () (write links) (newline)))
+  ;; what `raco setup` would leave in (find-user-share-dir): without it,
+  ;; `raco mod exec raco <cmd>` cannot see the packages' raco-commands
+  (define info-cache (build-path (state-dir root) "addon" (version) "share" "info-cache.rktd"))
+  (make-parent-directory* info-cache)
+  (with-output-to-file info-cache #:exists 'truncate/replace
+    (λ () (write (info-cache-entries links)) (newline)))
   (define gi (build-path (state-dir root) ".gitignore"))
   (unless (file-exists? gi) (display-to-file "*\n" gi))
   (define shared (share-compiled! root b))

@@ -2,7 +2,7 @@
 ;; Reading a package directory's info.rkt: deps, replaces, and what it links.
 (require racket/match racket/list racket/set racket/string racket/path racket/promise
          setup/getinfo pkg/lib pkg/name compiler/module-suffix)
-(provide pkg-deps pkg-version pkg-replaces pkg-links pkg-modules module-suffixes
+(provide pkg-deps pkg-version pkg-replaces pkg-links info-cache-entries pkg-modules module-suffixes
          std-pkg? std-version)
 
 ;; Packages that ship with the Racket installation act like Go's std:
@@ -58,6 +58,41 @@
     ['multi (list (list 'root d))]
     ['use-pkg-name (list (list name d))]
     [(? string? c) (list (list c d))]))
+
+;; -> info-cache.rktd entries for the collections these links.rktd entries
+;;    provide. `raco setup` normally writes this cache; find-relevant-directories
+;;    reads it, e.g. raco looks up `raco-commands` there.
+;;    Entry: (dir-bytes fields (lib "coll/sub") 1 0)
+(define (info-cache-entries links)
+  (define (fields dir)
+    (with-handlers ([exn:fail? (λ (_) '())])
+      (parameterize ([current-namespace (make-base-empty-namespace)])
+        ((dynamic-require (build-path dir "info.rkt") '#%info-domain)))))
+  (define (subdirs dir [omit '()])
+    (for/list ([s (in-list (directory-list dir))]
+               #:when (directory-exists? (build-path dir s))
+               #:unless (skipped? (build-path dir s))
+               #:unless (regexp-match? #rx"^[.]" (path->string s))
+               #:unless (member (path->string s) omit))
+      (path->string s)))
+  (define (walk dir coll)
+    (define has-info? (file-exists? (build-path dir "info.rkt")))
+    (define omit (if has-info? ((info dir) 'compile-omit-paths (λ () '())) '()))
+    (append
+      (if has-info?
+          (list (list (path->bytes (simplify-path dir)) (fields dir) (list 'lib coll) 1 0))
+          '())
+      (if (eq? omit 'all)
+          '()
+          (append* (for/list ([s (in-list (subdirs dir omit))])
+                     (walk (build-path dir s) (string-append coll "/" s)))))))
+  (append*
+    (for/list ([l (in-list links)])
+      (match l
+        [(list 'root d)
+         (append* (for/list ([s (in-list (subdirs d))])
+                    (walk (build-path d s) s)))]
+        [(list (? string? c) d) (walk (string->path d) c)]))))
 
 ;; Module file suffixes: Racket's own, the installation's, and those that the
 ;; given package directories declare in any of their info.rkt files (Rhombus
