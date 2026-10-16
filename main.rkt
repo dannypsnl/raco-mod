@@ -18,6 +18,7 @@ usage: raco mod <command> [args]
   why pkg              show the requirement chain that selects pkg's version
   env                  print environment settings for this project
   exec cmd args ...    sync, then run cmd inside this project's environment
+  drracket args ...    sync, then run DrRacket in this project, keeping user-scope tools
   clean [-n]           delete cached packages and compiled code no project uses (-n: only list)
 EOF
   )
@@ -25,6 +26,15 @@ EOF
 (define (racket-bin name)
   (define p (build-path (find-console-bin-dir) name))
   (if (file-exists? p) p (find-executable-path name)))
+
+;; run a Racket executable with these environment variables, exiting with its code
+(define (run-in vars cmd args)
+  (define exe (or (racket-bin cmd) (error 'raco-mod "command not found: ~a" cmd)))
+  (define env (environment-variables-copy (current-environment-variables)))
+  (for ([kv vars])
+    (environment-variables-set! env (string->bytes/utf-8 (car kv)) (string->bytes/utf-8 (cdr kv))))
+  (exit (parameterize ([current-environment-variables env])
+          (apply system*/exit-code exe args))))
 
 (define (show node)
   (if (eq? node 'root) "info.rkt" (format "~a@~a" (car node) (cdr node))))
@@ -65,12 +75,10 @@ EOF
     [(list "exec" cmd args ...)
      (define root (find-project-root))
      (sync! root)
-     (define exe (or (racket-bin cmd) (error 'raco-mod "command not found: ~a" cmd)))
-     (define env (environment-variables-copy (current-environment-variables)))
-     (for ([kv (project-env root)])
-       (environment-variables-set! env (string->bytes/utf-8 (car kv)) (string->bytes/utf-8 (cdr kv))))
-     (exit (parameterize ([current-environment-variables env])
-             (apply system*/exit-code exe args)))]
+     (run-in (project-env root) cmd args)]
+    [(list "drracket" args ...)
+     (define root (find-project-root))
+     (run-in (drracket-env! root (sync! root)) "drracket" args)]
     [_ (displayln usage (current-error-port)) (exit 2)]))
 
 (module+ main

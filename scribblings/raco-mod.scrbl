@@ -31,6 +31,9 @@
  @row[@cmd{why pkg} @elem{show the requirement chain that selects @exec{pkg}'s version}]
  @row[@cmd{env} @elem{print this project's environment variables (fish or sh)}]
  @row[@cmd{exec cmd args ...} @elem{sync, then run @exec{cmd} in the project's environment}]
+ @row[@cmd{drracket args ...}
+      @elem{sync, then run DrRacket in the project's environment, keeping
+            globally installed user-scope packages such as DrRacket tools}]
  @row[@cmd{clean [-n]}
       @elem{delete cached packages, downloads, mirrors, and compiled code that
             no project uses (@exec{-n}: only list them)}]]
@@ -168,6 +171,16 @@ Rhombus packages:
        @filepath{.zo} files are reused. The empty trailing element is the
        symbol @racket['same]; a literal @tt{same} would be a relative directory
        named @filepath{same}.}]
+
+@exec{drracket} cannot use @envvar{PLTADDONDIR} as is: DrRacket tools are
+usually installed in user scope, which it hides. It points
+@envvar{PLTADDONDIR} at @filepath{<project>/.rkt/drracket} instead, whose
+links file lists the build list first and then the global user-scope links,
+except packages the build list already provides. The global user-scope info
+cache, where @exec{raco setup} recorded the tools, is copied along, so
+DrRacket finds them. Programs run from DrRacket can therefore also require
+globally installed user-scope packages; use @exec{exec} for the strict
+environment.
 
 Compiled code is shared: @filepath{<project>/.rkt/compiled/<package path>} is
 a symbolic link to @filepath{zo/<key>}, where the key covers the package's

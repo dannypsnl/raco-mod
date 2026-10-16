@@ -6,7 +6,7 @@
 (require racket/list racket/match racket/file racket/string racket/set
          version/utils file/sha1
          "mvs.rkt" "fetch.rkt" "pkginfo.rkt" "infoedit.rkt" "atomic.rkt")
-(provide find-project-root get! sync! clean! project-env load-build path->arrow
+(provide find-project-root get! sync! clean! project-env drracket-env! load-build path->arrow
          (struct-out build))
 
 (define (sum-path root) (build-path root "info.sum"))
@@ -361,6 +361,54 @@
         ;; be a relative directory named "same"
         (cons "PLTCOMPILEDROOTS" (string-append (path->string (build-path st "compiled")) ":"))))
 
+;; DrRacket's tools are usually user-scope packages, which project-env hides.
+;; For DrRacket, a second addon dir links the build list first and then the
+;; globally installed user-scope packages, minus those the build list already
+;; provides. `raco setup` found their tools; its info cache is copied over so
+;; DrRacket finds them too.
+(define (drracket-env! root b #:user-addon [user-addon (find-system-path 'addon-dir)])
+  (define st (state-dir root))
+  (define proj (build-path st "addon" (version)))
+  (define user (build-path user-addon (version)))
+  (define dr (build-path st "drracket" (version)))
+  (define (read-or-empty p) (if (file-exists? p) (file->value p) '()))
+  ;; links.rktd and info-cache.rktd paths: a string, bytes, or a list of
+  ;; elements relative to the file's directory
+  (define (resolve p base)
+    (simplify-path
+      (path->complete-path
+        (cond [(list? p) (apply build-path (for/list ([e (in-list p)])
+                                             (if (bytes? e) (bytes->path-element e) e)))]
+              [(bytes? p) (bytes->path p)]
+              [else p])
+        base)))
+  (define taken (set-add (list->set (hash-keys (build-dirs b))) (dir-name root)))
+  (define user-links
+    (for*/list ([l (in-list (read-or-empty (build-path user "links.rktd")))]
+                [d (in-value (resolve (cadr l) user))]
+                #:unless (set-member? taken (dir-name d)))
+      (list* (car l) (path->string d) (cddr l))))
+  (define (under? p dir)
+    (define-values (pe de) (values (explode-path p) (explode-path dir)))
+    (and (<= (length de) (length pe)) (equal? (take pe (length de)) de)))
+  (define user-share (build-path user "share"))
+  (define user-info
+    (for*/list ([e (in-list (read-or-empty (build-path user-share "info-cache.rktd")))]
+                [d (in-value (match (car e)
+                               [(cons 'rel p) (resolve p user-share)]
+                               [p (resolve p user-share)]))]
+                #:when (for/or ([l (in-list user-links)]) (under? d (string->path (cadr l)))))
+      (cons (path->bytes d) (cdr e))))
+  (define (write-to p v)
+    (make-parent-directory* p)
+    (with-output-to-file p #:exists 'truncate/replace (λ () (write v) (newline))))
+  (write-to (build-path dr "links.rktd")
+            (append (read-or-empty (build-path proj "links.rktd")) user-links))
+  (write-to (build-path dr "share" "info-cache.rktd")
+            (append (read-or-empty (build-path proj "share" "info-cache.rktd")) user-info))
+  (list (cons "PLTADDONDIR" (path->string (build-path st "drracket")))
+        (assoc "PLTCOMPILEDROOTS" (project-env root))))
+
 ;; End to end, offline: local git repos behind a directory catalog.
 (module+ test
   (require rackunit racket/system racket/format setup/dirs file/zip file/sha1
@@ -578,6 +626,31 @@
         (define-values (global? _o) (run (bin "racket") app '("-e" "(require curly-fn)")))
         (when global?
           (check-exn exn:fail? (λ () (in-app "racket" "-e" "(require curly-fn)")))))
+
+      (test-case "drracket: build list first, then user-scope packages and their info cache"
+        (define b (sync! app))
+        (define user (build-path W "user-addon" (version)))
+        (write! (build-path user "pkgs" "t-tool" "info.rkt")
+                "#lang info\n(define collection \"t-tool\")\n(define t-drracket-tools '())\n")
+        (write! (build-path user "pkgs" "t-tool" "main.rkt") "#lang racket/base\n(display \"tool\")\n")
+        (write! (build-path user "pkgs" "c-lib" "info.rkt") "#lang info\n(define collection \"c\")\n")
+        (c-main! (build-path user "pkgs" "c-lib") "global")
+        (write! (build-path user "links.rktd")
+                (~s '(("t-tool" (#"pkgs" #"t-tool")) ("c" (#"pkgs" #"c-lib")))))
+        (write! (build-path user "share" "info-cache.rktd")
+                (~s '(((rel up #"pkgs" #"t-tool") (collection t-drracket-tools) (lib "t-tool") 1 0)
+                      ((rel up #"pkgs" #"c-lib") (collection) (lib "c") 1 0))))
+        (define env (drracket-env! app b #:user-addon (build-path W "user-addon")))
+        (define (dr . args)
+          (define-values (ok? out) (run (bin "racket") app args #:env env))
+          (if ok? (string-trim out) (error 'racket "~a" out)))
+        (check-equal? (dr "-l" "racket/base" "-l" "t-tool") "tool")
+        ;; the user's c-lib is skipped: the build list provides c-lib
+        (check-equal? (dr "-l" "racket/base" "-l" "c" "-e" "(display c-version)")
+                      (in-app "racket" "-l" "racket/base" "-l" "c" "-e" "(display c-version)"))
+        (check-equal? (dr "-l" "racket/base" "-l" "setup/getinfo" "-l" "racket/path" "-e"
+                          "(for ([d (find-relevant-directories '(t-drracket-tools))]) (display (file-name-from-path d)))")
+                      "t-tool"))
 
       (test-case "get edits #:version in info.rkt in place"
         (logged (λ () (get! app '("a-lib@latest"))))
