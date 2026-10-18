@@ -22,7 +22,9 @@
  @row[@bold{Command} @bold{Effect}]
  @row[@cmd{sync}
       @elem{resolve @filepath{info.rkt} deps with MVS, write @filepath{info.sum},
-            and link the build list into @filepath{.rkt/}}]
+            link the build list into @filepath{.rkt/}, and compile the project in
+            parallel the first time (later syncs skip this while the build list is
+            unchanged)}]
  @row[@cmd{get pkg[@"@"X.Y|@"@"latest|@"@"none] ...}
       @elem{set @racket[#:version] in the @racket[deps] of @filepath{info.rkt}
             (or remove the dependency), re-pin, then sync}]
@@ -158,7 +160,17 @@ Rhombus packages:
 <project>/.rkt/           (gitignored)
   addon/<version>/links.rktd
   compiled/
+  built                   stamp: the build list sync last compiled
+  build.log               project modules that failed to compile
 }|
+
+@exec{sync} compiles the project's modules in parallel the first time, and with
+them every dependency module they require, so the first command in a project
+does not compile them one at a time. Dependencies' own tests and docs are not
+compiled: they need the dependencies' build-deps, which are not in the build
+list. The @filepath{built} stamp records which build list was compiled (it
+hashes the same keys the @filepath{zo/} sharing uses), so an unchanged resync
+skips the compile. Modules that fail are listed in @filepath{build.log}.
 
 @exec{exec}, and the variables printed by @exec{env}, set:
 

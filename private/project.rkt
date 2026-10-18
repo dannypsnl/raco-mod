@@ -4,10 +4,12 @@
 ;;   mod-replace                        local overrides
 ;; info.sum is generated output: the id, time and content hash of each version.
 (require racket/list racket/match racket/file racket/string racket/set
-         version/utils file/sha1
+         version/utils file/sha1 racket/system racket/runtime-path compiler/find-exe
          "mvs.rkt" "fetch.rkt" "pkginfo.rkt" "infoedit.rkt" "atomic.rkt")
 (provide find-project-root get! sync! clean! project-env drracket-env! load-build path->arrow
          (struct-out build))
+
+(define-runtime-path warm-rkt "warm.rkt")
 
 (define (sum-path root) (build-path root "info.sum"))
 (define (state-dir root) (build-path root ".rkt"))
@@ -172,6 +174,7 @@
   (unless (file-exists? gi) (display-to-file "*\n" gi))
   (define shared (share-compiled! root b))
   (log "~a packages (~a sharing compiled code)" (hash-count (build-dirs b)) shared)
+  (warm-build! root b)
   b)
 
 ;; ---------------------------------------------------------------- shared .zo
@@ -246,6 +249,33 @@
        ;; compile locally; drop a link left from an earlier build list
        (when (link-exists? link) (delete-file link))
        0])))
+
+;; ---------------------------------------------------------------- warm build
+
+;; Compile the project's modules in parallel once per build list, instead of
+;; module by module on first use. CM compiles the dependency modules they
+;; require, which leaves out dependencies' tests and docs: those need the
+;; dependencies' build-deps, which are not in the build list.
+;; The stamp changes whenever compiled-keys do.
+(define (warm-build! root b)
+  (define keys (compiled-keys root b))
+  (define stamp
+    (sha1 (open-input-string (format "~s" (sort (filter values (hash-values keys)) string<?)))))
+  (define stamp-file (build-path (state-dir root) "built"))
+  (unless (and (file-exists? stamp-file) (equal? (file->string stamp-file) stamp))
+    (define suffixes (module-suffixes (cons root (hash-values (build-dirs b)))))
+    (define files (pkg-module-files (dir-name root) root suffixes))
+    (define env (environment-variables-copy (current-environment-variables)))
+    (for ([kv (project-env root)])
+      (environment-variables-set! env (string->bytes/utf-8 (car kv)) (string->bytes/utf-8 (cdr kv))))
+    ;; a child process, so collections resolve through the project's links
+    (parameterize ([current-environment-variables env]
+                   [current-input-port
+                    (open-input-string (string-join (map path->string files) "\n"))])
+      (system* (find-exe) warm-rkt (path->string root)
+               (path->string (build-path (state-dir root) "build.log"))))
+    ;; even after failures: CM retries those on demand and reports them there
+    (write-atomically stamp stamp-file #:display? #t)))
 
 ;; specs : (listof "name" | "name@ver" | "name@latest" | "name@none")
 ;; Edits #:version in info.rkt deps, then syncs. If anything fails, info.rkt
@@ -543,6 +573,15 @@
         (check-equal? (in-app "racket" "main.rkt") "a+1.2 b c=1.2")
         (check-equal? (why (build-res (load-build app)) "c-lib")
                       '(root ("b-lib" . "0.5") ("c-lib" . "1.2"))))
+
+      (test-case "warm build writes a stamp and leaves it unchanged on an unchanged resync"
+        (define stamp (build-path (state-dir app) "built"))
+        (check-true (file-exists? stamp))
+        (define s1 (file->string stamp))
+        (logged (λ () (sync! app)))
+        (check-equal? (file->string stamp) s1)
+        ;; still runnable from the shared .zo the warm build produced
+        (check-equal? (in-app "racket" "main.rkt") "a+1.2 b c=1.2"))
 
       (test-case "a dependency's minimum is at least what was current when it was committed"
         (logged (λ () (get! app '("k-lib" "l-lib"))))

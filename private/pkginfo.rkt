@@ -2,8 +2,8 @@
 ;; Reading a package directory's info.rkt: deps, replaces, and what it links.
 (require racket/match racket/list racket/set racket/string racket/path racket/promise
          setup/getinfo pkg/lib pkg/name compiler/module-suffix)
-(provide pkg-deps pkg-version pkg-replaces pkg-links info-cache-entries pkg-modules module-suffixes
-         std-pkg? std-version)
+(provide pkg-deps pkg-version pkg-replaces pkg-links info-cache-entries pkg-modules pkg-module-files
+         module-suffixes std-pkg? std-version)
 
 ;; Packages that ship with the Racket installation act like Go's std:
 ;; they are never resolved by MVS.
@@ -94,7 +94,7 @@
                     (walk (build-path d s) s)))]
         [(list (? string? c) d) (walk (string->path d) c)]))))
 
-;; Module file suffixes: Racket's own, the installation's, and those that the
+;; Module file suffixes: the installation's (Racket's own among them), and those that the
 ;; given package directories declare in any of their info.rkt files (Rhombus
 ;; declares #"rhm" in rhombus/info.rkt, not at the package root). Packages in
 ;; a build list are not installed, so the installation alone does not know them.
@@ -110,8 +110,7 @@
                 #:when (bytes? sfx))
       sfx))
   (remove-duplicates
-    (append '(#"rkt" #"ss" #"scm" #"scrbl")
-            (get-module-suffixes)
+    (append (get-module-suffixes)
             (append-map declared dirs))))
 
 (define (skipped? p)
@@ -139,6 +138,42 @@
                                   (not (regexp-match? #rx"^[.]|^compiled$" (path->string sub)))))
              (mods-under (build-path d sub) (string-append (path->string sub) "/"))))]
         [(list c d) (mods-under d (string-append c "/"))]))))
+
+;; The absolute paths of the module files to compile: those pkg-modules names,
+;; minus what each directory's info.rkt lists in compile-omit-paths, as
+;; `raco setup` does.
+(define (pkg-module-files name dir suffixes)
+  (define rx
+    (byte-regexp (bytes-append #"[.](" (apply bytes-append (add-between suffixes #"|")) #")$")))
+  (define (files-under d [inherited '()])
+    (define i (get-info/full d))
+    (define omit (if i (i 'compile-omit-paths (λ () '())) '()))
+    (define omitted
+      (append inherited
+              (if (list? omit)
+                  (for/list ([o omit] #:when (string? o)) (simplify-path (build-path d o) #f))
+                  '())))
+    (if (eq? omit 'all)
+        '()
+        (for*/list ([f (in-list (directory-list d #:build? #t))]
+                    #:unless (or (skipped? f) (member (simplify-path f #f) omitted))
+                    [m (in-list (cond
+                                  [(directory-exists? f) (files-under f omitted)]
+                                  [(and (regexp-match? rx (path->bytes f))
+                                        (not (equal? (path->string (file-name-from-path f)) "info.rkt")))
+                                   (list f)]
+                                  [else '()]))])
+          m)))
+  (append*
+    (for/list ([l (in-list (pkg-links name dir))])
+      (match l
+        [(list 'root d)
+         (append*
+           (for/list ([sub (in-list (directory-list d))]
+                      #:when (and (directory-exists? (build-path d sub))
+                                  (not (regexp-match? #rx"^[.]|^compiled$" (path->string sub)))))
+             (files-under (build-path d sub))))]
+        [(list c d) (files-under d)]))))
 
 (module+ test
   (require rackunit racket/file)
@@ -178,6 +213,15 @@
     (check-not-false (member #"xyz" all))
     (check-not-false (member #"rkt" all))
     (check-equal? (pkg-modules "p" d all) '("lang/main.xyz"))
+    (delete-directory/files d))
+
+  (test-case "module files to compile honor compile-omit-paths at any level"
+    (define d (pkg "#lang info\n(define collection \"c\")\n(define compile-omit-paths '(\"content\" \"x/skip.rkt\"))\n"
+                   "main.rkt" "content/post.scrbl" "x/keep.rkt" "x/skip.rkt" "y/z.rkt"))
+    (display-to-file "#lang info\n(define compile-omit-paths 'all)\n" (build-path d "y" "info.rkt"))
+    (check-equal? (sort (map (λ (f) (path->string (find-relative-path d f))) (pkg-module-files "p" d sfx))
+                        string<?)
+                  '("main.rkt" "x/keep.rkt"))
     (delete-directory/files d))
 
   (test-case "modules, ignoring info.rkt and compiled/"
